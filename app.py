@@ -173,7 +173,8 @@ def extract_text_impl(pdf_path: str):
             "docling",
             "--from", "pdf",
             "--to", "md",
-            "--no-ocr",                 # important: évite l’OCR si texte déjà présent
+            "--no-ocr",                 # important: no ocr
+            "--no-image",               # skip image
             "--output", out_dir,
             "--abort-on-error",
             pdf_path,
