@@ -15,6 +15,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libgl1 \
+    libglib2.0-0 \
+    libxext6 \
+    libxrender1 \
+    libsm6 \
+  && rm -rf /var/lib/apt/lists/*  
+
 # Déps Python
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
