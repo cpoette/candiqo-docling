@@ -1,0 +1,301 @@
+import base64
+import os
+import re
+import tempfile
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+from flask import Flask, jsonify, request
+from werkzeug.utils import secure_filename
+
+# ------------------------------------------------------------
+# Config
+# ------------------------------------------------------------
+
+SERVICE_NAME = os.getenv("SERVICE_NAME", "cv-extractor")  # ex: "docling" / "pdfparse"
+MAX_BYTES = int(os.getenv("MAX_BYTES", str(15 * 1024 * 1024)))  # 15MB default
+
+app = Flask(__name__)
+
+
+# ------------------------------------------------------------
+# Helpers: scoring / quality
+# ------------------------------------------------------------
+
+def compute_quality(text: str) -> Dict[str, Any]:
+    text = text or ""
+    char_count = len(text)
+
+    letters = len(re.findall(r"[A-Za-zÀ-ÿ]", text))
+    alpha_ratio = (letters / char_count) if char_count else 0.0
+
+    words = re.findall(r"[A-Za-zÀ-ÿ]{2,}", text.lower())
+    unique_words = len(set(words))
+
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    line_count = len(lines)
+    short_lines = sum(1 for ln in lines if len(ln.strip()) < 12)
+    short_line_ratio = (short_lines / line_count) if line_count else 0.0
+
+    weird = len(re.findall(r"[�\uFFFD]", text))
+    garbage_ratio = (weird / char_count) if char_count else 0.0
+
+    return {
+        "char_count": char_count,
+        "alpha_ratio": round(alpha_ratio, 4),
+        "unique_words": unique_words,
+        "line_count": line_count,
+        "short_line_ratio": round(short_line_ratio, 4),
+        "garbage_ratio": round(garbage_ratio, 4),
+    }
+
+
+def compute_risk(quality: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Risk score = proxy 'risque de trahison' / structure instable.
+    0 (safe) -> 100 (danger)
+    """
+    risk = 0
+    flags: List[str] = []
+
+    char_count = quality.get("char_count", 0)
+    alpha_ratio = quality.get("alpha_ratio", 0.0)
+    unique_words = quality.get("unique_words", 0)
+    short_line_ratio = quality.get("short_line_ratio", 0.0)
+    garbage_ratio = quality.get("garbage_ratio", 0.0)
+
+    if char_count == 0:
+        risk = 100
+        flags.append("empty_text")
+        return {"risk_score": risk, "flags": flags}
+
+    if alpha_ratio < 0.25:
+        risk += 40
+        flags.append("low_alpha_ratio")
+
+    if unique_words < 80:
+        risk += 25
+        flags.append("low_unique_words")
+
+    if short_line_ratio > 0.55:
+        risk += 30
+        flags.append("layout_fragmented")
+
+    if garbage_ratio > 0.002:
+        risk += 20
+        flags.append("garbage_chars")
+
+    risk = max(0, min(100, risk))
+    if risk <= 20:
+        flags.append("ok")
+    elif risk <= 50:
+        flags.append("warn")
+    else:
+        flags.append("danger")
+
+    return {"risk_score": risk, "flags": flags}
+
+
+# ------------------------------------------------------------
+# File handling
+# ------------------------------------------------------------
+
+@dataclass
+class IncomingPdf:
+    path: str
+    filename: str
+
+
+def _save_uploaded_pdf() -> IncomingPdf:
+    """
+    Accepts either:
+      - multipart/form-data with 'pdf' file
+      - application/json with { "filename": "...", "content_base64": "..." }
+    Writes to a unique temp file and returns path.
+    """
+    # multipart
+    if "pdf" in request.files:
+        pdf_file = request.files["pdf"]
+        safe_name = secure_filename(pdf_file.filename or "document.pdf")
+
+        # Create unique temp file
+        fd, temp_path = tempfile.mkstemp(prefix="pdf_", suffix="_" + safe_name)
+        os.close(fd)
+
+        pdf_file.save(temp_path)
+        return IncomingPdf(path=temp_path, filename=safe_name)
+
+    # json base64
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        filename = secure_filename(data.get("filename", "document.pdf"))
+        content_b64 = data.get("content_base64", "")
+
+        if not content_b64:
+            raise ValueError("Missing content_base64 in JSON body")
+
+        raw = base64.b64decode(content_b64)
+
+        if len(raw) > MAX_BYTES:
+            raise ValueError(f"File too large: {len(raw)} bytes > {MAX_BYTES}")
+
+        fd, temp_path = tempfile.mkstemp(prefix="pdf_", suffix="_" + filename)
+        os.close(fd)
+
+        with open(temp_path, "wb") as f:
+            f.write(raw)
+
+        return IncomingPdf(path=temp_path, filename=filename)
+
+    raise ValueError("No PDF provided. Use multipart field 'pdf' or JSON with content_base64.")
+
+
+# ------------------------------------------------------------
+# Extraction implementation placeholder
+# ------------------------------------------------------------
+
+def extract_text_impl(pdf_path: str):
+    """
+    Docling via CLI:
+      - convertit en Markdown dans un dossier temporaire
+      - lit le .md généré
+    """
+    import os
+    import glob
+    import tempfile
+    import subprocess
+
+    warnings = []
+    meta = {"pages": None}
+
+    with tempfile.TemporaryDirectory(prefix="docling_out_") as out_dir:
+        cmd = [
+            "docling",
+            "--from", "pdf",
+            "--to", "md",
+            "--no-ocr",                 # important: évite l’OCR si texte déjà présent
+            "--output", out_dir,
+            "--abort-on-error",
+            pdf_path,
+        ]
+
+        try:
+            # stdout/stderr capturés pour debug si besoin
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            raise RuntimeError("docling CLI not found. Is docling installed in the image?")
+
+        if proc.returncode != 0:
+            warnings.append("docling_cli_failed")
+            # Remonte un message court (pas tout le stderr)
+            err = (proc.stderr or "").strip().splitlines()[-1:]  # dernière ligne
+            raise RuntimeError(f"docling failed: {' '.join(err) if err else 'unknown error'}")
+
+        # Docling écrit un fichier md dans out_dir
+        md_files = glob.glob(os.path.join(out_dir, "*.md"))
+        if not md_files:
+            warnings.append("docling_no_md_output")
+            return "", meta, warnings
+
+        # S’il y en a plusieurs, on prend le plus récent
+        md_files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        md_path = md_files[0]
+
+        with open(md_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+
+        if not text.strip():
+            warnings.append("docling_empty_output")
+
+        # Optionnel: tu peux tenter d’inférer pages via JSON si tu exportes aussi --to json
+        return text, meta, warnings
+
+
+
+# ------------------------------------------------------------
+# Routes
+# ------------------------------------------------------------
+
+@app.get("/health")
+def health():
+    return jsonify({"status": "ok", "service": SERVICE_NAME})
+
+
+@app.post("/score")
+def score():
+    if not request.is_json:
+        return jsonify({"error": "Expected JSON body {text: ...}"}), 400
+
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+
+    quality = compute_quality(text)
+    risk = compute_risk(quality)
+
+    # A simple readability score derived from quality/risk
+    # (you can tune later; keep deterministic)
+    readability_score = max(0, min(100, int(
+        (quality["alpha_ratio"] * 60)
+        + (min(1.0, quality["unique_words"] / 1200) * 25)
+        + (min(1.0, quality["char_count"] / 12000) * 25)
+        - (risk["risk_score"] * 0.5)
+    )))
+
+    return jsonify({
+        "quality": quality,
+        "risk": risk,
+        "readability_score": readability_score,
+    })
+
+
+@app.post("/extract")
+def extract():
+    # Optional: ?strategy=auto|docling|pymupdf4llm|pdfparse
+    strategy = request.args.get("strategy", "auto")
+
+    incoming: Optional[IncomingPdf] = None
+    try:
+        incoming = _save_uploaded_pdf()
+
+        text, meta, warnings = extract_text_impl(incoming.path)
+
+        quality = compute_quality(text)
+        risk = compute_risk(quality)
+
+        # Keep response stable, even if empty
+        return jsonify({
+            "strategy_used": SERVICE_NAME if strategy == "auto" else strategy,
+            "text": text,
+            "meta": {
+                "filename": incoming.filename,
+                **(meta or {}),
+            },
+            "quality": quality,
+            "risk": risk,
+            "warnings": warnings or [],
+        })
+
+    except Exception as e:
+        return jsonify({
+            "strategy_used": SERVICE_NAME,
+            "error": str(e),
+        }), 400
+
+    finally:
+        # Always cleanup temp file
+        try:
+            if incoming and incoming.path and os.path.exists(incoming.path):
+                os.remove(incoming.path)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    # Local dev only; in Docker we use gunicorn
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
