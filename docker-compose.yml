@@ -1,0 +1,33 @@
+version: "3.8"
+
+services:
+  docling:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: candiqo-docling
+    ports:
+      - "3002:5000"
+    environment:
+      - ENV=development
+      - LOG_LEVEL=info
+      - PORT=5000
+      - WORKERS=1
+      - THREADS=4
+      - TIMEOUT=180
+    volumes:
+      - .:/app:delegated
+    command: gunicorn --reload -w 1 --threads 4 -b 0.0.0.0:5000 app:app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - candiqo_network
+
+networks:
+  candiqo_network:
+    external: true

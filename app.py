@@ -12,7 +12,7 @@ from werkzeug.utils import secure_filename
 # Config
 # ------------------------------------------------------------
 
-SERVICE_NAME = os.getenv("SERVICE_NAME", "cv-extractor")  # ex: "docling" / "pdfparse"
+SERVICE_NAME = os.getenv("SERVICE_NAME", "docling")  # ex: "docling" / "pdfparse"
 MAX_BYTES = int(os.getenv("MAX_BYTES", str(15 * 1024 * 1024)))  # 15MB default
 
 app = Flask(__name__)

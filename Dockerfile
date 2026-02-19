@@ -1,4 +1,3 @@
-# Dockerfile
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -10,21 +9,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# (Optionnel mais recommandé) : paquets de base utiles (certs, etc.)
+# Install system deps + curl
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
+    curl \
     libgl1 \
     libglib2.0-0 \
     libxext6 \
     libxrender1 \
     libsm6 \
-  && rm -rf /var/lib/apt/lists/*  
+  && rm -rf /var/lib/apt/lists/*
 
-# Déps Python
+# Python deps
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
@@ -36,6 +32,6 @@ EXPOSE 5000
 # Prod server
 CMD ["sh", "-c", "gunicorn -w ${WORKERS} --threads ${THREADS} -t ${TIMEOUT} -b 0.0.0.0:${PORT} app:app"]
 
+# Healthcheck avec curl
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health').read()"
-
+  CMD curl -f http://127.0.0.1:5000/health || exit 1
